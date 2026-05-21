@@ -46,20 +46,22 @@ type Cache [b][kvh][cs][dh] = {
 
 def matmul [n][m][p] (A: [n][m]f32) (B: [m][p]f32): [n][p]f32 =
     let dot_prod (a: [m]f32) (b: [m]f32): f32 =
-        reduce (+) 0.0 (map2 (*) a b)
+        f32.sum (map2 (*) a b)
     in map (\a -> map (dot_prod a) (transpose B)) A
 
 def softmax [n] (a: [n]f32): [n]f32 = -- Operates over vectors, later mapped over matrices.
-    let shifted = map ((+) (-(reduce f32.max a[0] a))) a -- Subtracts max for stability.
+    let shifted = map ((+) (-(f32.maximum a))) a -- Subtracts max for stability.
     let es = map f32.exp shifted
-    let sum = reduce (+) 0.0 es
+    let sum = f32.sum es
     in map (\e -> e / sum) es
 
-def argmax [n] (a: [n]f32): i64 = -- Operates over vectors, later mapped over matrices.
-    let update ((mx_v, mx_i): (f32, i64)) ((curr_v, curr_i): (f32, i64)) =
-        if mx_v < curr_v then (curr_v, curr_i) else (mx_v, mx_i)
-    let (_, mx_i) = reduce_comm update (a[0], 0) (zip a (iota n)) -- reduce_comm is better optimized.
-    in mx_i
+def argmax [n] (xs: []f32) : i64 =
+  (reduce_comm (\(vx, ix) (vy, iy) ->
+                 if vx < vy || (vx == vy && ix < iy)
+                 then (vy, iy)
+                 else (vx, ix))
+              (f32.lowest, n)
+              (zip xs (iota n))).1
 
 -- FeedForward
 def ff [l][d][f] (xs: [l][d]f32) (ffn_gate: [d][f]f32) (ffn_up: [d][f]f32) (ffn_down: [f][d]f32): [l][d]f32 =
@@ -71,7 +73,7 @@ def ff [l][d][f] (xs: [l][d]f32) (ffn_gate: [d][f]f32) (ffn_up: [d][f]f32) (ffn_
 -- RMSNorm
 def rms_norm [l][d] (xs: [l][d]f32) (gamma: [d]f32): [l][d]f32 =
     let norm_row (x: [d]f32): [d]f32 =
-        let var = (reduce (+) 0.0 (map (\xi -> xi * xi) x)) / f32.i64 d
+        let var = (f32.sum (map (\xi -> xi * xi) x)) / f32.i64 d
         let rms = f32.sqrt (var + 1e-6)
         in map2 (\xi gi -> gi * xi / rms) x gamma
     in map norm_row xs
