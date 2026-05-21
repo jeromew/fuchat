@@ -1,0 +1,7 @@
+futhark-data
+futhark-server
+numpy
+gguf
+jinja2
+humanize
+tokenizers
