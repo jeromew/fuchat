@@ -44,6 +44,8 @@ A pure f32 version before implementing KV Cache was running at 2-5 tokens/sec so
 Can Futhark reach 100 t/s ? Gotta Go Fast!
 It is already impressive that Futhark can reach 25 tokens/s with a one file, typed checked, standalone .fut file !
 
+If you are interested on improving the speed of `fuchat`, a blog post was written on [how to benchmark fuchat](https://futhark-lang.org/blog/2026-05-22-benchmarking-a-real-futhark-application.html) using futhark's tools.
+
 
 ## Acknowledgements
 
