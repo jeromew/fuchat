@@ -44,10 +44,8 @@ type Cache [b][kvh][cs][dh] = {
 }
 
 
-def matmul [n][m][p] (A: [n][m]f32) (B: [m][p]f32): [n][p]f32 =
-    let dot_prod (a: [m]f32) (b: [m]f32): f32 =
-        f32.sum (map2 (*) a b)
-    in map (\a -> map (dot_prod a) (transpose B)) A
+def matmul A B =
+    map (\a -> map f32.sum (transpose (map2 (\x -> map (*x)) a B))) A
 
 def softmax [n] (a: [n]f32): [n]f32 = -- Operates over vectors, later mapped over matrices.
     let shifted = map ((+) (-(f32.maximum a))) a -- Subtracts max for stability.
