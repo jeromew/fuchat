@@ -119,10 +119,14 @@ class LLM:
         self.server.put_value('max_new_tokens', np.int64(cnt))
         self.server.put_value('eos_token_id', np.int64(self.eos_token_id))
         self.server.cmd_call('gen', 'out', 'xsat', 'xs', 'params', 'cache', 'eos_token_id', 'max_new_tokens')
-        tokens_out = self.server.get_value('out')
+        self.server.cmd_free('cache')
+        self.server.cmd_project('tokens', 'out', '0')
+        self.server.cmd_project('cache', 'out', '1')
+        tokens_out = self.server.get_value('tokens')
         self.kvcached = self.kvcached + len(tokens_in) + len(tokens_out) - 1
 
         self.server.cmd_free('out')
+        self.server.cmd_free('tokens')
         self.server.cmd_free('xsat')
         self.server.cmd_free('xs')
         self.server.cmd_free('eos_token_id')
