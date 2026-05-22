@@ -139,11 +139,12 @@ def gen_token [T][cs][b][v][d][f][h][kvh][dh] (xsat: i64) (xs: [T]i64) (max_new_
 -- inference also stops when a maximum of max_new_tokens has been generated
 -- or when the context is full
 --
-entry gen [cs][b][v][d][f][h][kvh][dh] (xsat: i64) (xs: []i64) (ps: Params [b][v][d][f][h][kvh][dh]) (cache: *Cache [b][kvh][cs][dh]) (eos_token_id: i64) (max_new_tokens: i64) : []i64 =
-    let res = loop (i, cache, xsat, xs: []i64, new_tokens) = (0, cache, xsat, xs, replicate max_new_tokens 0)
+entry gen [cs][b][v][d][f][h][kvh][dh] (xsat: i64) (xs: []i64) (ps: Params [b][v][d][f][h][kvh][dh]) (cache: *Cache [b][kvh][cs][dh]) (eos_token_id: i64) (max_new_tokens: i64) : ([]i64, *Cache [b][kvh][cs][dh]) =
+  let (i, cache, _, _, new_tokens) =
+    loop (i, cache, xsat, xs: []i64, new_tokens) = (0, cache, xsat, xs, replicate max_new_tokens 0)
         while (i < max_new_tokens && (xsat + i) < cs && new_tokens[i64.max 0 i-1] != eos_token_id)
             do gen_token xsat xs max_new_tokens i new_tokens ps cache
-    in take res.0 res.4
+  in (take i new_tokens, cache)
 
 -- `init` is called during server instanciation to pre-build some arrays
 -- mask: causal mask used for attention
