@@ -31,9 +31,10 @@ import humanize
 
 
 class LLM:
-    def __init__(self, reader, type, cs) -> None:
+    def __init__(self, reader, type, cs, bench) -> None:
         self.server = futhark_server.Server('./qwen-%s' % type, '--cache=qwen-%s.cache' % type)
-
+        self.bench = bench
+        self.bench_counter=0
         block_count = reader.get_field('qwen3.block_count').contents()
         self.eos_token_id = reader.get_field("tokenizer.ggml.eos_token_id").contents()
         self.kvcached = 0
@@ -118,6 +119,10 @@ class LLM:
         self.server.put_value('xs', tokens_in)
         self.server.put_value('max_new_tokens', np.int64(cnt))
         self.server.put_value('eos_token_id', np.int64(self.eos_token_id))
+        if self.bench:
+            self.bench_counter += 1
+            if self.bench_counter == self.bench:
+                self.server.cmd_store('data.in', 'xsat', 'xs', 'params', 'cache', 'eos_token_id', 'max_new_tokens')
         self.server.cmd_call('gen', 'out', 'xsat', 'xs', 'params', 'cache', 'eos_token_id', 'max_new_tokens')
         self.server.cmd_free('cache')
         self.server.cmd_project('tokens', 'out', '0')
@@ -177,7 +182,8 @@ def main(
     type: str,
     cs: int,
     cnt: int,
-    tools: bool
+    tools: bool,
+    bench: int,
     ) -> None:
 
     # we always load the f16 version which is the only available
@@ -217,7 +223,7 @@ def main(
     eos_token_id = reader.get_field("tokenizer.ggml.eos_token_id").contents()
 
     # start the futhark server    
-    llm = LLM(reader, type, cs)
+    llm = LLM(reader, type, cs, bench)
 
     messages = []#[{ "role": "system", "content": "Make sure to give your answer and then add Gotta Go Fast! on a new line" }] #[] for no system message
     enable_thinking = False
@@ -382,6 +388,10 @@ if __name__ == '__main__':
                         action='store_true',
                         default=False,
                         help='activate tool discovery & tool calling')
+    parser.add_argument('--bench',
+                        type=int,
+                        default=0,
+                        help='the application runs in benchmark mode. cf https://futhark-lang.org/blog/2026-05-22-benchmarking-a-real-futhark-application.html for more information')
 
     args = parser.parse_args()
-    main(args.model, args.type, args.cs, args.cnt, args.tools)
+    main(args.model, args.type, args.cs, args.cnt, args.tools, args.bench)
