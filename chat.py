@@ -22,7 +22,10 @@ import numpy as np
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+from tokenizers.processors import ByteLevel as ByteLevelPostProcessor
+from tokenizers.pre_tokenizers import Sequence, Split
 from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer
+from tokenizers.normalizers import NFC
 
 from gguf.gguf_reader import GGUFReader
 
@@ -38,6 +41,7 @@ class LLM:
         block_count = reader.get_field('qwen3.block_count').contents()
         self.eos_token_id = reader.get_field("tokenizer.ggml.eos_token_id").contents()
         self.kvcached = 0
+        self.tokens = np.array([],  dtype=np.int64)
         total_bytes = 0
         print("-"*80)
         print("Prepare tensors for %s inference inside Futhark server..." % type)
@@ -110,8 +114,21 @@ class LLM:
         self.server.cmd_free('cache')
         return self.server.__exit(exc_type, exc_value, traceback)
 
+    def shared_prefix_length(self, arr1, arr2):
+        min_len = min(len(arr1), len(arr2))
+        diff_mask = arr1[:min_len] != arr2[:min_len]
+        if not np.any(diff_mask):
+            return min_len
+        return np.argmax(diff_mask)
+
     def gen(self, ids: np.ndarray, cnt: int) -> np.ndarray:
         
+        # we need to take into account that recent `ids` may have
+        # drifted from the kvcache :
+        # discard kvcache entries occuring after the drift
+        self.kvcached = self.shared_prefix_length(ids, self.tokens)
+        self.tokens = self.tokens[:self.kvcached]
+
         # ids here contains the whole context
         # prompt extension with new tokens
         tokens_in = ids[self.kvcached:]
@@ -129,7 +146,7 @@ class LLM:
         self.server.cmd_project('cache', 'out', '1')
         tokens_out = self.server.get_value('tokens')
         self.kvcached = self.kvcached + len(tokens_in) + len(tokens_out) - 1
-
+        self.tokens = np.concatenate([self.tokens, tokens_in, tokens_out[:-1]])
         self.server.cmd_free('out')
         self.server.cmd_free('tokens')
         self.server.cmd_free('xsat')
@@ -211,13 +228,26 @@ def main(
     ggml_merges = reader.get_field("tokenizer.ggml.merges").contents()
     tokenizer = Tokenizer(BPE(
         vocab={token: idx for idx, token in enumerate(ggml_tokens)},
-        merges=[tuple(merge.split()) for merge in ggml_merges]
+        merges=[tuple(merge.split()) for merge in ggml_merges],
     ))
+    tokenizer.normalizer = NFC()
     tokenizer.add_special_tokens([ggml_tokens[idx] for idx in range(len(ggml_tokens)) if ggml_token_type[idx] in (3,4)])
     tokenizer.decoder = ByteLevelDecoder()
-    tokenizer.pre_tokenizer = ByteLevelPreTokenizer(add_prefix_space=False)
+    regex_pattern = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+    tokenizer.pre_tokenizer = Sequence([
+        Split(pattern=regex_pattern, behavior="isolated", invert=False),
+        ByteLevelPreTokenizer(add_prefix_space=False, trim_offsets=False, use_regex=False)
+    ])
+    tokenizer.post_processor = ByteLevelPostProcessor(
+        add_prefix_space=False,
+        trim_offsets=False,
+        use_regex=False
+    )
 
     # prepare the chat jinja2 template
+    # note that this template is not able to create tokens in an idempotent way
+    # Each role:user messages deletes the previous reasoning traces
+    # This needs to be taken into account for optimizing inference vs kvcache drift
     chat_template = reader.get_field("tokenizer.chat_template").contents()
     rtemplate = Environment(loader=BaseLoader).from_string(chat_template)
     eos_token_id = reader.get_field("tokenizer.ggml.eos_token_id").contents()
@@ -276,10 +306,15 @@ def main(
                 messages = [m for m in messages if m["role"] == "system" ]
                 context_size = 0
                 llm.kvcached = 0
+                llm.tokens = np.array([],  dtype=np.int64)
                 continue
             if user_message == "show":
-                print("full context is displayed when sending message")
+                print("context is displayed when sending message")
                 show_context = True
+                if len(messages):
+                    print("-"*27, " current messages context ", "-"*27)
+                    print(rtemplate.render({ "tools": tools, "messages": messages }))
+                    print("-"*80)
                 continue
             if user_message == "hide":
                 print("context is not displayed when sending message, only the assistant's answer")
@@ -309,6 +344,9 @@ def main(
         count_tokens = 0
         ids = np.array(tokenizer.encode(in_text).ids, dtype=np.int64)
         assistant_message_ids = np.array([],  dtype=np.int64)
+        reasoning_capture = np.array([],  dtype=np.int64)
+        reasoning_registering = False
+        reasoning_content = None
         tool_call_capture = np.array([],  dtype=np.int64)
         tool_call_registering = False
         tool_calls = []
@@ -320,26 +358,44 @@ def main(
             streaming = np.array([],  dtype=np.int64)
             for id in out[len(ids):limit]:
                 count_tokens = count_tokens + 1
+                if id == tokenizer.token_to_id("<think>"):
+                    reasoning_registering = True
+                    continue
                 if id == tokenizer.token_to_id("<tool_call>"):
                     tool_call_registering = True
-                if tool_call_registering:
+                    continue
+                if id == tokenizer.token_to_id("</think>"):
+                    reasoning_registering = False
+                    reasoning_content = tokenizer.decode(reasoning_capture.tolist(), skip_special_tokens=False).strip()
+                    reasoning_capture = np.array([],  dtype=np.int64)
+                    continue
+                if id == tokenizer.token_to_id("</tool_call>"):
+                    tool_call_registering = False
+                    tool_calls.append(json.loads(tokenizer.decode(tool_call_capture.tolist(), skip_special_tokens=False).strip()))
+                    tool_call_capture = np.array([],  dtype=np.int64)
+                    continue
+                if reasoning_registering:
+                    reasoning_capture = np.append(reasoning_capture, id)
+                elif tool_call_registering:
                     tool_call_capture = np.append(tool_call_capture, id)
                 else:
                     streaming = np.append(streaming, id)
-                if id == tokenizer.token_to_id("</tool_call>"):
-                    tool_call_registering = False
-                    tool_calls.append(json.loads(tokenizer.decode(tool_call_capture.tolist()).strip()))
-                    tool_call_capture = np.array([],  dtype=np.int64)
-
             if show_context:
                 print(tokenizer.decode(out[len(ids):limit].tolist(), skip_special_tokens=False), end='', flush=True)
             else:
                 print(tokenizer.decode(streaming.tolist(), skip_special_tokens=False), end='', flush=True)
             assistant_message_ids = np.append(assistant_message_ids, streaming)
             if limit == -1:
+                if reasoning_registering or tool_call_registering:
+                    print("\n !!!anomaly: <think> tag or <tool_call> tag not closed by the model despite eos_token_id")
+                    if reasoning_registering:
+                        reasoning_registering = False
+                        reasoning_content = tokenizer.decode(reasoning_capture.tolist(), skip_special_tokens=False).strip()
+                        reasoning_capture = np.array([],  dtype=np.int64)
                 messages.append({ 
                     "role": "assistant",
-                    "content": tokenizer.decode(assistant_message_ids.tolist(), skip_special_tokens=False),
+                    "content": tokenizer.decode(assistant_message_ids.tolist(), skip_special_tokens=False).strip(),
+                    "reasoning_content": reasoning_content,
                     "tool_calls": tool_calls
                 })
                 for tool_call in tool_calls:
