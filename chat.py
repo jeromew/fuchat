@@ -132,6 +132,7 @@ class LLM:
         # ids here contains the whole context
         # prompt extension with new tokens
         tokens_in = ids[self.kvcached:]
+
         self.server.put_value('xsat', np.int64(self.kvcached))
         self.server.put_value('xs', tokens_in)
         self.server.put_value('max_new_tokens', np.int64(cnt))
@@ -145,8 +146,6 @@ class LLM:
         self.server.cmd_project('tokens', 'out', '0')
         self.server.cmd_project('cache', 'out', '1')
         tokens_out = self.server.get_value('tokens')
-        self.kvcached = self.kvcached + len(tokens_in) + len(tokens_out) - 1
-        self.tokens = np.concatenate([self.tokens, tokens_in, tokens_out[:-1]])
         self.server.cmd_free('out')
         self.server.cmd_free('tokens')
         self.server.cmd_free('xsat')
@@ -154,6 +153,9 @@ class LLM:
         self.server.cmd_free('eos_token_id')
         self.server.cmd_free('max_new_tokens')
 
+        # last generated token has not been cached yet
+        self.kvcached = self.kvcached + len(tokens_in) + len(tokens_out) - 1
+        self.tokens = np.concatenate([self.tokens, tokens_in, tokens_out[:-1]])
         tokens = np.concatenate([ids, tokens_out])
         return tokens
 
@@ -340,7 +342,7 @@ def main(
             print(in_text)
             print("-"*80)
 
-        start = time.time()
+        prompt_start = time.time()
         count_tokens = 0
         ids = np.array(tokenizer.encode(in_text).ids, dtype=np.int64)
         assistant_message_ids = np.array([],  dtype=np.int64)
@@ -350,8 +352,21 @@ def main(
         tool_call_capture = np.array([],  dtype=np.int64)
         tool_call_registering = False
         tool_calls = []
+        isPrompt = True
         while ids[-1] != eos_token_id and len(ids) <= cs:
-            out = llm.gen(ids, cnt)
+            howmany = cnt
+            if isPrompt:
+                howmany = 1
+                prompt_kvcached = llm.shared_prefix_length(llm.tokens, ids)
+                prompt_num = len(ids) - prompt_kvcached
+            out = llm.gen(ids, howmany)
+            if isPrompt:
+                prompt_end = time.time()
+                newtok_start = time.time()
+                newtok_num = 0
+                isPrompt = False
+            else:
+                newtok_num = newtok_num + len(out) - len(ids)
             limit = len(out)
             if (out[-1] == eos_token_id):
                 limit = -1
@@ -386,6 +401,7 @@ def main(
                 print(tokenizer.decode(streaming.tolist(), skip_special_tokens=False), end='', flush=True)
             assistant_message_ids = np.append(assistant_message_ids, streaming)
             if limit == -1:
+                newtok_end = time.time()
                 if reasoning_registering or tool_call_registering:
                     print("\n !!!anomaly: <think> tag or <tool_call> tag not closed by the model despite eos_token_id")
                     if reasoning_registering:
@@ -412,8 +428,7 @@ def main(
                     else:
                         print("Error: wrong tool name %s" % tool_call["name"])
                 context_size = len(ids) + len(assistant_message_ids)
-                end = time.time()
-                print(f'\nt/s: {count_tokens/(end-start):.3f} s')
+                print(f'\nkvcache reuse: {prompt_kvcached} / prompt processing: {prompt_num} tokens at t/s: {prompt_num/(prompt_end-prompt_start):.3f}, generation: {newtok_num} tokens at t/s: {newtok_num/(newtok_end-newtok_start):.3f} s')
                 break
             else:
                 ids = out
