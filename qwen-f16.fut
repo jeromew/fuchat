@@ -36,7 +36,7 @@ type Params [b][v][d][f][h][kvh][dh] = {
 
 -- mask: Causal self-attention mask.
 type Cache [b][kvh][cs][dh] = {
-    mask: [cs][cs]f16,
+--    mask: [cs][cs]f16,
     cos: [cs][dh]f16,
     sin: [cs][dh]f16,
     kcache: [b][kvh][cs][dh]f16,
@@ -44,22 +44,22 @@ type Cache [b][kvh][cs][dh] = {
 }
 
 
-def matmul [n][m][p] (A: [n][m]f16) (B: [m][p]f16): [n][p]f16 =
-    let dot_prod (a: [m]f16) (b: [m]f16): f16 =
-        reduce (+) 0.0 (map2 (*) a b)
-    in map (\a -> map (dot_prod a) (transpose B)) A
+def matmul A B =
+    map (\a -> map f16.sum (transpose (map2 (\x -> map (*x)) a B))) A
 
 def softmax [n] (a: [n]f16): [n]f16 = -- Operates over vectors, later mapped over matrices.
-    let shifted = map ((+) (-(reduce f16.max a[0] a))) a -- Subtracts max for stability.
+    let shifted = map ((+) (-(f16.maximum a))) a -- Subtracts max for stability.
     let es = map f16.exp shifted
-    let sum = reduce (+) 0.0 es
+    let sum = f16.sum es
     in map (\e -> e / sum) es
 
-def argmax [n] (a: [n]f16): i64 = -- Operates over vectors, later mapped over matrices.
-    let update ((mx_v, mx_i): (f16, i64)) ((curr_v, curr_i): (f16, i64)) =
-        if mx_v < curr_v then (curr_v, curr_i) else (mx_v, mx_i)
-    let (_, mx_i) = reduce_comm update (a[0], 0) (zip a (iota n)) -- reduce_comm is better optimized.
-    in mx_i
+def argmax [n] (xs: []f16) : i64 =
+  (reduce_comm (\(vx, ix) (vy, iy) ->
+                 if vx < vy || (vx == vy && ix < iy)
+                 then (vy, iy)
+                 else (vx, ix))
+              (f16.lowest, n)
+              (zip xs (iota n))).1
 
 -- FeedForward
 def ff [l][d][f] (xs: [l][d]f16) (ffn_gate: [d][f]f16) (ffn_up: [d][f]f16) (ffn_down: [f][d]f16): [l][d]f16 =
@@ -71,7 +71,7 @@ def ff [l][d][f] (xs: [l][d]f16) (ffn_gate: [d][f]f16) (ffn_up: [d][f]f16) (ffn_
 -- RMSNorm
 def rms_norm [l][d] (xs: [l][d]f16) (gamma: [d]f32): [l][d]f16 =
     let norm_row (x: [d]f16): [d]f16 =
-        let var = (reduce (+) 0.0 (map (\xi -> (f32.f16 xi) * (f32.f16 xi)) x)) / f32.i64 d
+        let var = (f32.sum (map (\xi -> (f32.f16 xi) * (f32.f16 xi)) x)) / f32.i64 d
         let rms = f32.sqrt (var + 1e-6)
         in map2 (\xi gi -> f16.f32 (gi * (f32.f16 xi) / rms)) x gamma
     in map norm_row xs
@@ -104,7 +104,8 @@ def gqa [b][cs][T][d][h][kvh][dh] (bidx: i64) (xsat: i64) (xs: [T][d]f16)
     let vs = flatten (map (replicate (h/kvh)) (kvcache.vcache[bidx, :, :xsat+T])) :> [h][xsat+T][dh]f16
     -- calculate attention with causal mask
     let raw_att = map2 (\q k -> matmul q (transpose k)) qs ks |> map (map (map (\a -> a * s)))
-    let att = map (\head -> map2 (map2 (+)) head (kvcache.mask[xsat:xsat+T, :xsat+T] :> [T][xsat+T]f16) |> map softmax) raw_att
+    --let att = map (\head -> map2 (map2 (+)) head (kvcache.mask[xsat:xsat+T, :xsat+T] :> [T][xsat+T]f16) |> map softmax) raw_att
+    let att = map (\head -> map2 (map2 (+)) head (tabulate_2d T (xsat+T) (\i j -> if j > (i+xsat) then -f16.inf else 0.0)) |> map softmax) raw_att
     let conts = map2 matmul att vs |> transpose |> map flatten
     in (matmul conts attn_output, kvcache)
 
@@ -152,7 +153,7 @@ entry gen [cs][b][v][d][f][h][kvh][dh] (xsat: i64) (xs: []i64) (ps: Params [b][v
 -- kcache/vcache: kvcache
 --
 entry init (b: i64) (kvh: i64) (cs: i64) (dh: i64): Cache [b][kvh][cs][dh] = {
-    mask=tabulate_2d cs cs (\i j -> if j > i then -f16.inf else 0.0),
+--    mask=tabulate_2d cs cs (\i j -> if j > i then -f16.inf else 0.0),
     cos=map2 (\i r -> map (\c -> f16.f32(f32.cos(c*(f32.i64 i)))) r) (iota cs) (replicate cs (flatten (replicate 2 (map (\i -> (1 / (1000000f32 ** ((f32.i64 i) * 2 / f32.i64 dh)))) (iota 64))))) :> [cs][dh]f16,
     sin=map2 (\i r -> map (\c -> f16.f32(f32.sin(c*(f32.i64 i)))) r) (iota cs) (replicate cs (flatten (replicate 2 (map (\i -> (1 / (1000000f32 ** ((f32.i64 i) * 2 / f32.i64 dh)))) (iota 64))))) :> [cs][dh]f16,
     kcache=replicate b (replicate kvh (replicate cs (replicate dh 0))),

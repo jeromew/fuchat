@@ -36,7 +36,7 @@ type Params [b][v][d][f][h][kvh][dh] = {
 
 -- mask: Causal self-attention mask.
 type Cache [b][kvh][cs][dh] = {
-    mask: [cs][cs]f32,
+--    mask: [cs][cs]f32,
     cos: [cs][dh]f32,
     sin: [cs][dh]f32,
     kcache: [b][kvh][cs][dh]f32,
@@ -104,7 +104,8 @@ def gqa [b][cs][T][d][h][kvh][dh] (bidx: i64) (xsat: i64) (xs: [T][d]f32)
     let vs = flatten (map (replicate (h/kvh)) (kvcache.vcache[bidx, :, :xsat+T])) :> [h][xsat+T][dh]f32
     -- calculate attention with causal mask
     let raw_att = map2 (\q k -> matmul q (transpose k)) qs ks |> map (map (map (\a -> a * s)))
-    let att = map (\head -> map2 (map2 (+)) head (kvcache.mask[xsat:xsat+T, :xsat+T] :> [T][xsat+T]f32) |> map softmax) raw_att
+    --let att = map (\head -> map2 (map2 (+)) head (kvcache.mask[xsat:xsat+T, :xsat+T] :> [T][xsat+T]f32) |> map softmax) raw_att
+    let att = map (\head -> map2 (map2 (+)) head (tabulate_2d T (xsat+T) (\i j -> if j > (i+xsat) then -f32.inf else 0.0)) |> map softmax) raw_att
     let conts = map2 matmul att vs |> transpose |> map flatten
     in (matmul conts attn_output, kvcache)
 
@@ -152,7 +153,7 @@ entry gen [cs][b][v][d][f][h][kvh][dh] (xsat: i64) (xs: []i64) (ps: Params [b][v
 -- kcache/vcache: kvcache
 --
 entry init (b: i64) (kvh: i64) (cs: i64) (dh: i64): Cache [b][kvh][cs][dh] = {
-    mask=tabulate_2d cs cs (\i j -> if j > i then -f32.inf else 0.0),
+--    mask=tabulate_2d cs cs (\i j -> if j > i then -f32.inf else 0.0),
     cos=map2 (\i r -> map (\c -> f32.cos(c*(f32.i64 i))) r) (iota cs) (replicate cs (flatten (replicate 2 (map (\i -> (1 / (1000000f32 ** ((f32.i64 i) * 2 / f32.i64 dh)))) (iota 64))))) :> [cs][dh]f32,
     sin=map2 (\i r -> map (\c -> f32.sin(c*(f32.i64 i))) r) (iota cs) (replicate cs (flatten (replicate 2 (map (\i -> (1 / (1000000f32 ** ((f32.i64 i) * 2 / f32.i64 dh)))) (iota 64))))) :> [cs][dh]f32,
     kcache=replicate b (replicate kvh (replicate cs (replicate dh 0))),
