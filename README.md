@@ -33,16 +33,27 @@ and hopefully, after downloading the model weights ( ~1.5GB in float16 format), 
 
 It was developed and tested on an AMD 6700XT with 12GB of VRAM, with the Futhark `hip` backend.
 
-In `f32`mode it reaches around 20-25 token/s and 10 tokens/s in f16. 
+tests are done without tools defined and with thinking disabled 
 
-As a comparison, on the same card, llama.cpp has an inference of around 150 t/s with the f16 quantized model, and around 110 t/s with the f32 quantized model. 
+The 'hedgehog' prompt is "write a story about a hedgehog". The statistics are given for the second run.
 
-It is a bit surprising that the f16 version of fuchat is 2 times slower than the f32 version as we could expect a gain from the fact that only half of the memory has to move.
+| gguf  | command | prompt t/s | generation t/s |
+| - | - | - | - |
+| Qwen3-0.6B-f16.gguf  | python .\chat.py --type f32 --cnt 50 | 331.9 | 23.7 |
+| Qwen3-0.6B-f32.gguf  | llama-cli --model Qwen3-0.6B-f32.gguf -ctv f32 -ctk f32 | 2189.5 | 56.5 |
+| Qwen3-0.6B-f16.gguf  | python .\chat.py --type f16 --cnt 50  | 348.9 | 29.0 |
+| Qwen3-0.6B-f16.gguf  | llama-cli --model Qwen3-0.6B-f16.gguf -ctv f16 -ctk f16 | 5107.3 | 145.9 |
+
+Note1: the Qwen3-0.6B-f32.gguf model was prepared from Qwen3-0.6B-f16.gguf with the command `llama-quantize Qwen3-0.6B-f16.gguf f32`
+Note2: llama-cli is launched with these additional parameters `--temperature 0 --top-k 1 --reasoning off`. The llama.cpp kvcache quantization is adapted with `-ctv` and `-ctk` to match what is happening in fuchat
+
+Observations:
+ - prompt t/s during the first run are lower by a large factor both on fuchat & llama.cpp. It could be due to the first calls of the kernels & some cache on gpu
+ - it would be interesting to check how the prompt t/s of llama.cpp is calculated vs fuchat to understand the huge difference
 
 A pure f32 version before implementing KV Cache was running at 2-5 tokens/sec so the Futhark "update in-place" mechanism brings a great performance boost for this type of caching.
 
-Can Futhark reach 100 t/s ? Gotta Go Fast!
-It is already impressive that Futhark can reach 25 tokens/s with a one file, typed checked, standalone .fut file !
+It is impressive that Futhark can reach ~ half the speed of llama.cpp on f32 with a one file, typed checked, standalone ~ 100 lines .fut file (without comments) !
 
 If you are interested on improving the speed of `fuchat`, a blog post was written on [how to benchmark fuchat](https://futhark-lang.org/blog/2026-05-22-benchmarking-a-real-futhark-application.html) using futhark's tools.
 
